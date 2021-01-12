@@ -54,8 +54,9 @@ volatile int toner = 0;
 void enc_interrupt() __interrupt(EXTI2_ISR) {
   //PB_IDR
   uint8_t ab = !(ENCODER_PORT_IDR & _BV(ENCODER_PIN_A)) << 1 | !(ENCODER_PORT_IDR & _BV(ENCODER_PIN_B));
-  int8_t iz_tabele = rotacijska_tabela[last_ab << 2 | ab];
-  enc_cnt += iz_tabele;
+  //int8_t iz_tabele = rotacijska_tabela[last_ab << 2 | ab];
+  //enc_cnt += iz_tabele;
+  enc_cnt += rotacijska_tabela[last_ab << 2 | ab];
   last_ab = ab;
 }
 
@@ -84,8 +85,9 @@ void tone(uint16_t t0, int16_t ms_duration) {
   TIM2_CCR3L = new_duty;
 
   //wait while the tone plays
-  while(ms_duration-- > 1)
+  while(ms_duration--) {
     util_delay_milliseconds(1);
+  }
 
   //restore settings
   TIM2_PSCR = pscr;
@@ -99,29 +101,6 @@ void tone(uint16_t t0, int16_t ms_duration) {
   DIR_PORT_ODR |= dir_pin;
 }
 
-/*
-void timer1_pwm_init() {
-  TIM1_BKR |= _BV(7); //MOE , timer output enable
-
-  //Timer
-  TIM1_PSCRH = 0;
-  TIM1_PSCRL = 8;
-
-  TIM1_ARRH = 0;
-  TIM1_ARRL = 255; //Max / Top
-
-  //CH2
-
-  //TIM2_IER |= _BV(TIM2_IER_UIE);
-  TIM1_CR1 |= _BV(TIM2_CR1_CEN);
-
-  TIM1_CCMR1 |=  (0b110 << 4); //pwm mode 1 //bita 0 in 1 moreta bit na nic ce ces met izhod
-  TIM1_CCER1 |= _BV(0); //< treba je nastavit za 1. kanal
-
-  TIM1_CCR1H = 0;
-  TIM1_CCR1L = 200; //Duty
-}
-*/
 volatile uint16_t delta = 0;
 volatile uint16_t tmp = 0;
 void input_capture() __interrupt(TIM2_CC_ISR) {
@@ -194,35 +173,31 @@ void set_output(uint8_t power, int8_t dir) {
   }
 }
 
-volatile uint16_t capture_value  = 0;
-/*
-void input_capture() __interrupt(TIM2_CC_ISR) {
-  static uint16_t tmp = 0;
-  uint8_t end = TIM2_SR1 & _BV(1);//CC1IF
-  uint16_t ccr = TIM2_CCR1H << 8 | TIM2_CCR1L;
+void find_limit(int8_t dir) {
+  set_output(255, dir);
+  util_delay_milliseconds(100);
 
-  if(PD_IDR & _BV(4)) {
-    TIM2_CCER1 |= _BV(1);
-    tmp = ccr;
+  //enc_cnt = 0;
+  int16_t last_cnt = 0;
+  uint8_t steps = 0;
+
+  while(1) {
+    if(abs(enc_cnt - last_cnt) < 5) {
+        if(++steps >= 5) {
+          set_output(0,0);
+          util_delay_milliseconds(100);
+          //enc_cnt=0;
+          return;
+        }
+    }
+    else {
+      steps = 0;
+    }
+    last_cnt = enc_cnt;
+    util_delay_milliseconds(40);
   }
-  else {
-    capture_value = ccr - tmp;
-    if(capture_value > 2100)
-      capture_value = 1000;
 
-    TIM2_CCER1 &= ~_BV(1);
-  }
 }
-void timer2_input_capture_init() {
-  TIM2_IER |= _BV(1); //CC1IE
-  TIM2_EGR |= _BV(1);//CC1G
-  TIM2_CCMR1 |= _BV(0) | (0b1111<<4); //4x filter, TI1FP1
-  TIM2_CCER1 |= _BV(0); //Enable capture
-  TIM2_PSCR |= 0b0100;
-
-  TIM2_CR1 |= _BV(TIM2_CR1_CEN) | _BV(TIM2_CR1_ARPE);
-}
-*/
 
 int main () {
     CLK_CKDIVR = 0;//16mhz
@@ -231,17 +206,27 @@ int main () {
     EXTI_CR1 = 0xff; //rising and falling edge for interrupts
 
     encoder_input_init();
-    //timer1_pwm_init();
     timer2_pwm_init();
     timer2_capture_init();
     outputs_init();
 
-    CAPTURE_PORT_CR1 |= _BV(CAPTURE_PIN);
+    CAPTURE_PORT_CR1 |= _BV(CAPTURE_PIN); //PULLUP
     uart_init(9600);
 
     enable_interrupts();
 
-    tone(TONE_C7, 500);
+
+    tone(TONE_C6, 500);
+    tone(TONE_D6, 500);
+    tone(TONE_E6, 500);
+
+    tone(TONE_D6, 2000);
+    find_limit(-1);
+    enc_cnt = 0;
+    tone(TONE_D6, 2000);
+    find_limit(1);
+    int16_t max = enc_cnt;
+    tone(TONE_D6, 2000);
 
     int16_t target = 5400; //max 30000 -> 5 krogov v vsako smerss
 
@@ -259,22 +244,37 @@ int main () {
     }
     */
 
+    float k = (enc_cnt/1000.0f);
+
+    uint8_t should_decelerate = 0;
+    int16_t old_target = 0;
 
     while(1) {
       if(delta < 1000) delta = 1000;
-      target = (delta-1000) * 5.4f;
+      target = (delta-1000) * k;
 
-      uint16_t error = abs(target - enc_cnt);
-
-      if(error > 500) {
-        set_output(255, enc_cnt < target);
+      if(abs(old_target - target) > 50) {
+        old_target = target;
+        should_decelerate = 1;
       }
-      else if(error > 25) {
-        set_output(190, enc_cnt < target);
+      uint16_t error = abs(target - enc_cnt);
+      //set_output(255, enc_cnt < target);
+      if(error < 50) {
+        should_decelerate = 0;
+        set_output(0,0);
+      }
+      else if(error < 500) {
+        if(should_decelerate) {
+          set_output(100, enc_cnt < target);
+        }
+        else {
+          set_output(255, enc_cnt < target);
+        }
       }
       else {
-        set_output(0, 0);
+        set_output(255, enc_cnt < target);
       }
+
 
       //printf("e %d d %u\n\r", enc_cnt, delta);
     }
