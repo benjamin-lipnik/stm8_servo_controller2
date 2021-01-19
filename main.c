@@ -6,8 +6,93 @@
 #include "stm8_utility.h"
 #include "uart.h"
 
+#define US_QUARTER_PERIOD 10
+#define OUTPUT_PIN     4
+
+//rx
+uint8_t last_state = 0;
+uint8_t bit_index = 0;
+uint8_t data = 0;
+uint8_t active = 0;
+uint8_t inactive_cnt = 0;
+uint8_t last_bit = 0;
+
+uint8_t rx_buffer[255];
+uint8_t rx_buffer_index = 0;
+
+void transmitt_init() {
+  PD_DDR |= _BV(OUTPUT_PIN);
+  PD_CR1 |= _BV(OUTPUT_PIN);
+}
+uint8_t send(uint8_t data) {
+  if(active)
+    return 0;
+  PD_DDR &= ~_BV(OUTPUT_PIN);
+  if(!(PD_IDR & _BV(OUTPUT_PIN))) {
+    return 0;
+  }
+  PD_DDR |= _BV(OUTPUT_PIN); //READY
+
+  for(uint8_t i = 0; i < 8; i++) {
+    PD_ODR &= ~_BV(OUTPUT_PIN);
+    if(data & _BV(7-i)) {
+      util_delay_microseconds(3 * US_QUARTER_PERIOD);
+      PD_ODR |= _BV(OUTPUT_PIN);
+      util_delay_microseconds(US_QUARTER_PERIOD);
+    }
+    else {
+      util_delay_microseconds(US_QUARTER_PERIOD);
+      PD_ODR |= _BV(OUTPUT_PIN);
+      util_delay_microseconds(3 * US_QUARTER_PERIOD);
+    }
+  }
+  PD_DDR &= ~_BV(OUTPUT_PIN);
+  util_delay_microseconds(4 * US_QUARTER_PERIOD);
+  return 1;
+}
+void recieve() {
+  uint8_t state = (PD_IDR & _BV(OUTPUT_PIN))>1;
+  uint8_t state_change = state != last_state;
+  last_state = state;
+
+  if(state_change) {
+    active = 1;
+
+    if(state) {
+      //Serial.println(inactive_cnt);
+      if(inactive_cnt > 14) {
+        data |= _BV(7-bit_index);
+        last_bit = 1;
+      }
+      else {
+        last_bit = 0;
+      }
+      if(++bit_index >= 8) {
+        rx_buffer[rx_buffer_index++] = data;
+        bit_index = 0;
+        data = 0;
+      }
+    }
+
+    inactive_cnt = 0;
+  }
+  else if(active) {
+    if(++inactive_cnt >= (30 + last_bit * 15)) {
+      inactive_cnt = 0;
+
+      active = 0;
+      data = 0;
+      bit_index = 0;
+    }
+  }
+}
+
 int putchar(int c) {
-    uart_write(c);
+    while(!send((char)c)) {
+      recieve();
+    }
+    //util_delay_microseconds(150);
+    //uart_write(c);
     return 0;
 }
 
@@ -136,6 +221,8 @@ void timer2_pwm_init() {
 
   TIM2_CCR3H = 0;
   TIM2_CCR3L = 0; //Duty
+
+  TIM2_CR1 |= _BV(TIM2_CR1_CEN);
 }
 void timer2_capture_init() {
   TIM2_IER |= _BV(1); //CC1IE
@@ -143,8 +230,6 @@ void timer2_capture_init() {
   TIM2_CCMR1 |= _BV(0) | (0b1111<<4); //4x filter, TI1FP1
   TIM2_CCER1 |= _BV(0); //Enable capture
   //TIM1_PSCR |= 0xffff; //<- IDK nevem zakaj ne dela
-
-  TIM2_CR1 |= _BV(TIM2_CR1_CEN);
 }
 
 void outputs_init() {
@@ -207,18 +292,22 @@ int main () {
 
     encoder_input_init();
     timer2_pwm_init();
-    timer2_capture_init();
+    //timer2_capture_init();
     outputs_init();
 
-    CAPTURE_PORT_CR1 |= _BV(CAPTURE_PIN); //PULLUP
-    uart_init(9600);
+    //CAPTURE_PORT_CR1 |= _BV(CAPTURE_PIN); //PULLUP
+    //uart_init(9600);
 
     enable_interrupts();
 
+    transmitt_init();
 
-    tone(TONE_C6, 500);
-    tone(TONE_D6, 500);
-    tone(TONE_E6, 500);
+
+    //tone(TONE_C6, 500);
+    //tone(TONE_D6, 500);
+    //tone(TONE_E6, 500);
+
+
 
     tone(TONE_D6, 2000);
     find_limit(-1);
@@ -228,21 +317,10 @@ int main () {
     int16_t max = enc_cnt;
     tone(TONE_D6, 2000);
 
+
     int16_t target = 5400; //max 30000 -> 5 krogov v vsako smerss
 
-    /*while(1) {
-      tone(delta, 50);
-    }
-    //*/
 
-    //target = 0;
-    /*while(1) {
-      if(toner) {
-        toner--;
-        tone(TONE_C6, 5);
-      }
-    }
-    */
 
     float k = (enc_cnt/1000.0f);
 
@@ -275,8 +353,9 @@ int main () {
         set_output(255, enc_cnt < target);
       }
 
-
+      printf("a\n");
       //printf("e %d d %u\n\r", enc_cnt, delta);
+      recieve();
     }
     //*/
 
